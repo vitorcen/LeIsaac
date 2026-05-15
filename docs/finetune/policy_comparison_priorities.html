@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="color-scheme" content="light only">
+<title>调研：Diffusion Policy / DiT Policy / RDT / Octo 在 LeIsaac SO-101 PickOrange 上的可行性与优先级</title>
+<style>
+  html { background: #ffffff; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    max-width: 1040px; margin: 2em auto; padding: 1.5em 2em;
+    line-height: 1.7; color: #1a1a1a; background: #ffffff;
+  }
+  h1 { color: #111; border-bottom: 2px solid #333; padding-bottom: .3em; }
+  h2 { color: #111; border-bottom: 1px solid #bbb; padding-bottom: .2em; margin-top: 2em; }
+  h3 { margin-top: 1.5em; color: #1f3a6b; }
+  a  { color: #1565c0; }
+  a:hover { color: #0b3d80; }
+  code { background: #eef0f3; color: #1a1a1a; padding: 1px 5px; border-radius: 3px; font-size: 0.92em; border: 1px solid #d8dce2; }
+  pre { background: #f6f7f9; color: #1a1a1a; padding: 1em; border-radius: 4px; overflow-x: auto; font-size: 0.9em; line-height: 1.5; border: 1px solid #d8dce2; }
+  pre code { background: transparent; border: none; padding: 0; }
+  table { border-collapse: collapse; margin: 1em 0; width: 100%; background: #fff; }
+  th, td { border: 1px solid #c4c8cf; padding: .5em .85em; text-align: left; vertical-align: top; }
+  th { background: #e8ebf0; color: #111; }
+  blockquote { margin: 1em 0; padding: .6em 1em; border-left: 4px solid #555; background: #f6f7f9; color: #1a1a1a; }
+  hr { border: none; border-top: 1px solid #c4c8cf; margin: 2em 0; }
+  .tag { display: inline-block; background: #dde6f3; color: #1f3a6b; padding: 2px 9px; border-radius: 10px; font-size: 0.8em; margin-right: 4px; }
+  .warn { background: #fdf3d1; border-left: 4px solid #b8860b; padding: .8em 1em; margin: 1em 0; color: #1a1a1a; }
+  .info { background: #dceefb; border-left: 4px solid #1f6cbd; padding: .8em 1em; margin: 1em 0; color: #1a1a1a; }
+  .ok   { background: #d8efde; border-left: 4px solid #1f8a3e; padding: .8em 1em; margin: 1em 0; color: #1a1a1a; }
+  .bad  { background: #f9d6d6; border-left: 4px solid #b71c1c; padding: .8em 1em; margin: 1em 0; color: #1a1a1a; }
+</style>
+</head>
+<body>
+
+<h1>调研：Diffusion Policy / DiT Policy / RDT / Octo 在 LeIsaac SO-101 PickOrange 上的可行性与优先级</h1>
+
+<p>
+<span class="tag">调研</span>
+<span class="tag">优先级</span>
+<span class="tag">SO-101</span>
+<span class="tag">PickOrange</span>
+</p>
+
+<p><b>作者</b>：vitorcen<br>
+<b>状态</b>：草案<br>
+<b>触发</b>：SmolVLA2 在 60 episode 数据上不稳定（2/5 success），ACT 和 GR00T 第一次就能 60s 内成功——说明 <b>SmolVLA 的 VLM-based 架构在 60 episode 规模上吃力</b>。换一类策略试。</p>
+
+<hr>
+
+<h2>1. 当前 baseline 快照（实测）</h2>
+
+<table>
+<tr><th>ckpt</th><th>参数量</th><th>架构（<code>config.type</code>）</th><th>VLM backbone</th><th>实测 success</th><th>备注</th></tr>
+<tr><td><a href="https://huggingface.co/shadowHokage/act_policy">shadowHokage/act_policy</a></td><td>~80M</td><td><code>act</code></td><td>ResNet18（ImageNet 预训）</td><td>✅ 1 分钟内成功</td><td>from scratch，10k step，batch 8，自然键 480×640</td></tr>
+<tr><td><a href="https://huggingface.co/LightwheelAI/leisaac-pick-orange-v0">LightwheelAI/leisaac-pick-orange-v0</a></td><td>~3B</td><td><code>gr00t_n1_5</code></td><td>NVIDIA Eagle 2 VLM</td><td>✅ 1 分钟内成功（实测 1/1）</td><td>LeIsaac 官方公开 ckpt</td></tr>
+<tr><td><a href="https://huggingface.co/edge-inference/smolvla-so101-pick-orange">edge-inference/smolvla-so101-pick-orange</a></td><td>~450M</td><td><code>smolvla</code></td><td>SmolVLM2-500M-Video-Instruct</td><td>❌ 0/3 @ horizon=50, 3×60s</td><td>第三方 SmolVLA fine-tune；微调自 <code>lerobot/smolvla_base</code>。60s 预算太紧</td></tr>
+<tr><td>本机 <code>smolvla2-leisaac-pick-orange</code></td><td>~450M</td><td><code>smolvla</code></td><td>同上</td><td>🟡 2/5 (40%) @ horizon=50, 5×120s<br>用户实测：抓得到但易抖；3 橙偶中 1</td><td>我们的 fine-tune；同样基于 <code>lerobot/smolvla_base</code>，30k step，对齐 edge-inference 配方</td></tr>
+</table>
+
+<div class="info">
+  <b>命名澄清</b>：HF 主 <code>lerobot</code> 包（pip v0.5.2）<b>不含</b> SmolVLA2。但 <a href="https://github.com/huggingface/VLAb">huggingface/VLAb</a>（LeRobot 的 official reproduction kit for SmolVLA pretraining）里有独立的 <code>policies/smolvla2/</code> 实现，<code>--policy.type=smolvla2</code>，是 v1 的架构升级版。HF 上目前还没有官方 <code>smolvla2_base</code> ckpt，只能从 <code>HuggingFaceTB/SmolVLM2-500M-Video-Instruct</code> 这个 VLM backbone 起训。注意：<code>edge-inference/smolvla-so101-pick-orange</code> 和我们本机 <code>smolvla2-leisaac-pick-orange</code> 都是 v1 的 fine-tune（<code>config.type="smolvla"</code>），<b>不是</b> VLAb 的 v2 架构。本地 <code>smolvla2-…</code> 这个名字是历史命名包袱，实际上是 SmolVLA v1。
+</div>
+
+<div class="warn">
+  <b>SmolVLA v1 → v2 关键升级</b>（对比两个 <code>config.py</code> 默认值）：
+  <ul>
+    <li><code>train_expert_only</code>: v1 <code>True</code> → v2 <code>False</code>（v2 同时训 VLM，不只是 action expert）</li>
+    <li>PEFT/LoRA: v1 可选 → v2 <b>默认开启</b>（r=4, alpha=16, dropout=0.1），让训 VLM 显存可控</li>
+    <li><code>num_expert_layers</code>: v2 可配（默认 -1），<code>expert_width_multiplier=0.75</code> 独立缩放 expert</li>
+    <li><b>含义</b>：v1 在小数据上 VLM 没机会适配 PickOrange 视觉分布；v2 通过 LoRA 让 VLM 也学一点，理论上小数据迁移更好</li>
+  </ul>
+</div>
+
+<div class="ok">
+  <b>结论一行</b>：60 episode × 36k frame 的数据规模 + 60s episode 预算下，<b>小参数 + 强归纳偏置</b>（ACT 80M ✅）显著优于 <b>大参数 VLA</b>（SmolVLA 450M：第三方 0/3，自家 2/5 @ 120s）。下面候选都满足"小参数 + 强结构先验"或"大规模机器人预训练"。
+</div>
+
+<div class="warn">
+  <b>关键证据</b>：连官方公开的 <code>edge-inference/smolvla-so101-pick-orange</code> 在 60s 预算下也 0/3。这<b>排除</b>"我们的训练流程有 bug"假设，<b>定位</b>到 SmolVLA 架构 + 60 ep 小数据这一组合本身的能力上限。我们的 v2 在 120s 长预算下还能 2/5，说明训练流程是对的，只是 SmolVLA 推理速度 + 动作精度跟不上 60s 严格预算。
+</div>
+
+<h2>2. 候选策略</h2>
+
+<h3>2.0 SmolVLA2（VLAb 仓库的新架构）— Hugging Face 官方</h3>
+<table>
+<tr><th>项</th><th>值</th></tr>
+<tr><td>来源</td><td><a href="https://github.com/huggingface/VLAb">huggingface/VLAb</a> · <code>src/lerobot/policies/smolvla2/</code>（约 75KB Python 实现）· 主仓库 LeRobot 还<b>没合并</b></td></tr>
+<tr><td>架构</td><td>SmolVLA v1 + LoRA-trained VLM + 可配 action expert（layers/width 独立）；flow matching 同 v1（num_steps=10）</td></tr>
+<tr><td>参数量</td><td>~450M total（同 v1），但 trainable 上升（v1 ~100M → v2 ~100M expert + LoRA on VLM）</td></tr>
+<tr><td>预训练 ckpt</td><td>❌ HF 上目前<b>没有 <code>lerobot/smolvla2_base</code></b>。只从 <code>HuggingFaceTB/SmolVLM2-500M-Video-Instruct</code>（VLM backbone）起训。VLAb 的定位是"reproduction kit for pretraining"——他们的预期是社区用自家数据预训出一个 smolvla2_base，目前还没公开发布</td></tr>
+<tr><td>训练框架</td><td>VLAb 仓库自带 <code>src/lerobot/scripts/train.py</code>，<b>独立于主 lerobot 包</b>；用 <code>accelerate launch</code></td></tr>
+<tr><td>典型训练步数</td><td>VLAb README 示例：batch=8, steps=10k–200k（数据规模差很大）</td></tr>
+<tr><td>LeRobot 集成</td><td>⚠️ 主 lerobot v0.5.2 <b>不识别</b> <code>--policy.type=smolvla2</code>；推理用的 <code>lerobot.async_inference.policy_server</code> 也无法加载 smolvla2 ckpt</td></tr>
+<tr><td>LeIsaac 集成成本</td><td>⚠️ <b>非平凡</b>：(a) clone VLAb 进 conda env，(b) 给推理写一个 VLAb-aware 的 policy_server，或把 smolvla2 代码 vendor 进我们的 lerobot fork，(c) <code>policy_inference.py</code> 加 <code>lerobot-smolvla2</code> 分支 + 客户端 schema 处理（同 v1）</td></tr>
+<tr><td>预计 4090 训练时长</td><td>~1.5–3h（LoRA 后 trainable 参数和 v1 相近，速度类似）</td></tr>
+<tr><td>预计 success</td><td><b>中等偏高</b>：v2 让 VLM 也微调（用 LoRA），理论上能解决 v1 "VLM 没适配本任务视觉分布"的问题。但无预训机器人 ckpt 起点，60 ep 直接训 v2 不一定比 v1 + smolvla_base 强</td></tr>
+<tr><td>风险</td><td>(1) 工程量大；(2) 无现成机器人预训 ckpt，相当于 from-scratch 训 VLA，60 ep 数据未必够</td></tr>
+</table>
+
+<h3>2.1 Diffusion Policy（DP）— Columbia / Chi et al 2023</h3>
+<table>
+<tr><th>项</th><th>值</th></tr>
+<tr><td>论文</td><td><a href="https://arxiv.org/abs/2303.04137">arXiv:2303.04137</a>（"Diffusion Policy: Visuomotor Policy Learning via Action Diffusion"）</td></tr>
+<tr><td>架构</td><td>1D-CNN UNet over action chunk，conditioned on ResNet18 vision features + state</td></tr>
+<tr><td>参数量</td><td>~100M（取决于 ResNet 大小 + UNet 深度）</td></tr>
+<tr><td>LeRobot 集成</td><td>✅ <b>已内置</b>：<code>--policy.type=diffusion</code>（<code>lerobot/policies/diffusion/</code>，Columbia 团队原代码移植）</td></tr>
+<tr><td>典型训练步数</td><td>50k–200k step（chunk_size=16, horizon=16）</td></tr>
+<tr><td>LeIsaac 客户端支持</td><td>⚠️ <b>需补 <code>lerobot-diffusion</code> 适配</b>：<code>policy_inference.py</code> 已经有 <code>lerobot-&lt;model_type&gt;</code> 分支，但 <code>service_policy_clients.py</code> 的 <code>LeRobotServicePolicyClient</code> 需要确认能接 diffusion 模型（理论上通用，需 smoke test）</td></tr>
+<tr><td>预计 4090 训练时长</td><td>50k step × ~10 step/s（batch 64）≈ <b>~1.5h</b></td></tr>
+<tr><td>预计 success</td><td><b>高</b>：DP 在小数据 visuomotor 上是工业 baseline；同尺度公开数据上社区已多次复现</td></tr>
+<tr><td>风险</td><td>chunk_size 比 ACT 短（16 vs 100），需要更高频再推理；客户端 horizon 调小</td></tr>
+</table>
+
+<h3>2.2 DiT Policy — LeRobot's <code>multi_task_dit</code></h3>
+<table>
+<tr><th>项</th><th>值</th></tr>
+<tr><td>来源</td><td>LeRobot 内置（Bryson Jones, 2025；<code>lerobot/policies/multi_task_dit/</code>）</td></tr>
+<tr><td>架构</td><td>Transformer-based diffusion，支持 diffusion 和 flow_matching 两种 objective；text + vision 条件；hidden 512 / 6 层 / 8 头（默认）</td></tr>
+<tr><td>参数量</td><td>~50–150M（取决于 layers/heads/hidden）</td></tr>
+<tr><td>LeRobot 集成</td><td>✅ <b>已内置</b>：<code>--policy.type=multi_task_dit</code></td></tr>
+<tr><td>典型训练步数</td><td>n_obs_steps=2, horizon=32, n_action_steps=24（~0.8s @ 30fps）</td></tr>
+<tr><td>LeIsaac 客户端支持</td><td>⚠️ 同 DP：需补 <code>lerobot-multi_task_dit</code> 路径 smoke test。<code>policy_type</code> 字符串含 <code>_</code> 可能要小改 split 逻辑（<code>args_cli.policy_type.split("-")[1]</code>）</td></tr>
+<tr><td>预计 4090 训练时长</td><td>~1–2h（DiT 比 UNet 略重）</td></tr>
+<tr><td>预计 success</td><td><b>中等偏高</b>：架构比 DP 新，flow_matching 收敛快；多任务能力对单任务可能"过度参数化"</td></tr>
+<tr><td>风险</td><td>"multi_task" 命名暗示设计目标是多任务；单任务上未必比 DP 更好</td></tr>
+</table>
+
+<h3>2.3 RDT-1B — Robotics Diffusion Transformer（清华 TSAIL）</h3>
+<table>
+<tr><th>项</th><th>值</th></tr>
+<tr><td>论文 / repo</td><td><a href="https://arxiv.org/abs/2410.07864">arXiv:2410.07864</a> · <a href="https://github.com/thu-ml/RoboticsDiffusionTransformer">thu-ml/RoboticsDiffusionTransformer</a> · <a href="https://huggingface.co/robotics-diffusion-transformer/rdt-1b">HF ckpt</a></td></tr>
+<tr><td>架构</td><td>1B-param Diffusion Transformer；SigLIP-SO400M 视觉 + T5-v1.1-XXL 语言；统一动作空间支持单/双臂 + 关节/末端控制；最多 3 路 RGB</td></tr>
+<tr><td>预训练数据</td><td>1M+ 多机器人 episode，46 个数据集（含 Open-X、DROID、BridgeData V2、RoboSet 等）</td></tr>
+<tr><td>LeRobot 集成</td><td>❌ <b>不在 LeRobot 列表中</b>。要么 fork 一个 LeRobot policy class wrapper，要么直接用 thu-ml repo 的训练脚本，再写 LeIsaac client 适配 RDT 的 ZMQ/HTTP 推理协议</td></tr>
+<tr><td>典型微调流程</td><td>repo 的官方 tutorial：~100 demo 微调 SO-101 类设备；fine-tune 推荐 ≥ 50 episode</td></tr>
+<tr><td>预计 4090 训练时长</td><td>1B 参数 + 双相机微调，单卡 4090 大概 <b>~12–24h</b>；可能撞显存上限（24GB 不一定够 full fine-tune，需要 LoRA / freeze backbone）</td></tr>
+<tr><td>预计 success</td><td><b>高但不确定</b>：预训练数据巨大且含 SO-100 / SO-ARM 类似 embodiment，理论上 60 episode 微调即可；但 1B 模型在小数据上可能过拟合，且没有现成 LeRobot adapter</td></tr>
+<tr><td>风险</td><td>显存 / 训练时长 / 客户端集成 全是工作量；显存若不够要 LoRA，效果可能打折</td></tr>
+</table>
+
+<h3>2.4 Octo（Octo-Base 1.5）— RAIL Berkeley</h3>
+<table>
+<tr><th>项</th><th>值</th></tr>
+<tr><td>论文 / repo</td><td><a href="https://arxiv.org/abs/2405.12213">arXiv:2405.12213</a> · <a href="https://github.com/octo-models/octo">octo-models/octo</a> · <a href="https://huggingface.co/rail-berkeley/octo-base-1.5">HF ckpt</a></td></tr>
+<tr><td>架构</td><td>93M（ViT-B 级别）Transformer + diffusion action head，window_size=2 obs，4-step action prediction</td></tr>
+<tr><td>预训练数据</td><td>Open-X Embodiment 26+ 数据集（Fractal/Kuka/Bridge/BC-Z 等）</td></tr>
+<tr><td>原生框架</td><td><b>JAX</b>（原 Octo repo 是 JAX，HF 已 wrap 成 transformers AutoModel；微调 / 推理是否完整支持 PyTorch 需要再确认）</td></tr>
+<tr><td>LeRobot 集成</td><td>❌ <b>不在 LeRobot 列表中</b>。要么写 LeRobot policy class 包 HF Octo wrapper，要么用 Octo repo 的 fine-tune 脚本</td></tr>
+<tr><td>典型微调</td><td>官方 fine-tune 脚本支持自定义数据，~10k step；JAX 训练 4090 需要 jax-cuda12</td></tr>
+<tr><td>预计 4090 训练时长</td><td>93M 模型，小数据微调 <b>~1–3h</b>，前提是 JAX 跑通</td></tr>
+<tr><td>预计 success</td><td><b>不确定</b>：93M 小模型 + Open-X 预训练，理论上很适合 60 episode 微调；但 JAX 环境 + 协议适配是非平凡前置工作</td></tr>
+<tr><td>风险</td><td>JAX env 单独管理；和 LeRobot 通用 policy_server 不兼容（自家 wrapper 才行）；下游 LeIsaac 客户端需要新写一类 client</td></tr>
+</table>
+
+<h2>3. 优先级排序</h2>
+
+<p>排序原则（Linus 模式）：</p>
+<ol>
+  <li><b>已有 scaffold 就先用</b>——LeRobot 内置的两个（DP / DiT）几乎零基建成本</li>
+  <li><b>先排除"架构不行"再做"工程量大"</b>——如果 DP/DiT 也搞不定，再说大模型；反之 ACT 已经搞定，说明 60 ep 任务<b>本身可学</b>，问题就在我们 SmolVLA 这一支</li>
+  <li><b>避免一次性吃两个新依赖</b>——RDT 和 Octo 都要新环境 + 新协议；先做能马上跑的</li>
+</ol>
+
+<table>
+<tr><th>顺序</th><th>策略</th><th>预估总工时</th><th>训练时长</th><th>预期收益 / 风险</th></tr>
+<tr>
+  <td>🥇 P0</td>
+  <td><b>Diffusion Policy</b>（<code>--policy.type=diffusion</code>）</td>
+  <td>~3h（含 client smoke + 训 + 评）</td>
+  <td>~1.5h</td>
+  <td>LeRobot 内置；社区在小数据 visuomotor 上验证最充分；最可能"开箱即用"成功</td>
+</tr>
+<tr>
+  <td>🥈 P1</td>
+  <td><b>DiT Policy</b>（<code>--policy.type=multi_task_dit</code>）</td>
+  <td>~3–4h</td>
+  <td>~1–2h</td>
+  <td>LeRobot 内置；架构比 DP 新；如果 DP 通了再跑 DiT 对比 diffusion vs flow_matching</td>
+</tr>
+<tr>
+  <td>🟦 P2</td>
+  <td><b>SmolVLA2</b>（VLAb 仓库 <code>--policy.type=smolvla2</code>）</td>
+  <td>~6–8h</td>
+  <td>~1.5–3h</td>
+  <td>v2 用 LoRA 微调 VLM，理论上比 v1 在小数据上更适配；但 (1) 无现成机器人 base ckpt，从 SmolVLM2 VLM 起训风险更大，(2) 推理 server 需要 vendor smolvla2 代码进我们的 lerobot fork，工程量比 DP/DiT 大。<b>价值</b>：直接对比 v1 vs v2 在同任务上的差距，量化"VLM LoRA"的收益</td>
+</tr>
+<tr>
+  <td>🥉 P3</td>
+  <td><b>Octo</b>（fine-tune from <code>octo-base-1.5</code>）</td>
+  <td>~6–10h</td>
+  <td>~1–3h</td>
+  <td>Open-X 预训练带来的迁移可能很强；前置工作：JAX env + LeIsaac client；做完是<b>预训练价值的对照实验</b></td>
+</tr>
+<tr>
+  <td>🚫 P4</td>
+  <td><b>RDT-1B</b>（fine-tune）</td>
+  <td>~12–20h</td>
+  <td>~12–24h（4090 可能要 LoRA）</td>
+  <td>1B 参数 + 显存紧 + 无 LeRobot adapter；如果 Octo 已经验证"大预训练 + 60 ep 微调"是否有用，RDT 边际信息量小；除非 Octo 也失败，才有动机搬 RDT</td>
+</tr>
+</table>
+
+<div class="info">
+  <b>为什么 SmolVLA2 不是 P0</b>：它的"VLM-with-LoRA"升级是<b>解决 SmolVLA 系列问题的对症药</b>，但代价是<b>无预训机器人 ckpt 起点</b>（HF 上还没有 <code>smolvla2_base</code>）。从 SmolVLM2 VLM 起训等于"少了一层 robotic prior"。在 60 ep 小数据上能不能赢过 v1 微调，需要实测才知道。而 DP / DiT 是<b>架构层面与 ACT 同档</b>（小参数 + 强 visuomotor 归纳偏置），更有把握。先做 P0/P1 拿到工作的轻量 baseline，再做 P2（SmolVLA2）量化 VLM 升级的价值。
+</div>
+
+<h2>4. 立即可做的 P0：Diffusion Policy</h2>
+
+<h3>4.1 训练命令模板（沿用现有 scaffold）</h3>
+<pre><code>cd ~/work/LeIsaac
+
+# 1) 数据集已就位（datasets/raw/leisaac-pick-orange，v3.0）
+
+# 2) Diffusion Policy 不需要 "prepare_base"——它从零训练，没有占位 schema 问题
+BASE_MODEL=""  # 留空走 --policy.type=diffusion 分支（需要小改 wrapper）
+DATASET_REPO_ID=LightwheelAI/leisaac-pick-orange \
+OUTPUT_NAME=dp-leisaac-pick-orange \
+STEPS=100000 \
+BATCH_SIZE=64 \
+NUM_WORKERS=2 \
+SAVE_FREQ=20000 \
+EXTRA_ARGS='--policy.type=diffusion --dataset.video_backend=pyav' \
+bash scripts/finetune/lerobot_finetune.sh
+</code></pre>
+
+<div class="warn">
+  ⚠️ wrapper 的 <code>--policy.path=$BASE_MODEL</code> 在 BASE_MODEL 为空时要走 <code>--policy.type=...</code> 分支；当前实现不支持，需小改 <code>lerobot_finetune.sh</code>（参考 ACT 的 from-scratch 训练命令）。
+</div>
+
+<h3>4.2 客户端 smoke test</h3>
+<pre><code># 启 LeRobot policy_server :8080（通用）
+bash ~/work/isaaclab-experience/scripts/policy_server.sh start lerobot
+
+# Isaac Sim 客户端
+cd ~/work/isaaclab-experience/LeIsaac && \
+  PYTHONUNBUFFERED=1 python -u scripts/evaluation/policy_inference.py \
+    --task=LeIsaac-SO101-PickOrange-v0 \
+    --eval_rounds=3 --episode_length_s=60 \
+    --policy_type=lerobot-diffusion \
+    --policy_host=127.0.0.1 --policy_port=8080 \
+    --policy_timeout_ms=15000 \
+    --policy_language_instruction='Pick the orange to the plate' \
+    --policy_checkpoint_path=/path/to/dp-leisaac-pick-orange/checkpoints/last/pretrained_model \
+    --policy_action_horizon=16 --device=cuda --enable_cameras
+</code></pre>
+
+<div class="info">
+  <b>预期</b>：DP 不用语言条件（架构里没 text encoder），但客户端发 task 字符串无害，server 端会忽略。chunk_size 默认 16；horizon 也设 16。
+</div>
+
+<h2>5. 后续 P1：DiT Policy</h2>
+<p>命令几乎一样，把 <code>--policy.type=multi_task_dit</code>。客户端 <code>--policy_type=lerobot-multi_task_dit</code>——但 <code>policy_type.split("-")[1]</code> 会拿到 <code>multi_task_dit</code> 整段，需确认 LeRobot server 端识别此 type 字符串。</p>
+
+<h2>6. P2：SmolVLA2（VLAb 集成）</h2>
+
+<p>三步走：</p>
+
+<ol>
+  <li><b>装 VLAb 训练环境</b>（独立 conda env，避免污染当前 lerobot env）：
+    <pre><code>cd ~/work
+git clone https://github.com/huggingface/VLAb VLAb
+cd VLAb && conda env create -f environment.yml -n vlab
+conda activate vlab
+export PYTHONPATH="$PWD/src:$PYTHONPATH"
+python tests/test_installation.py
+</code></pre>
+  </li>
+  <li><b>训练命令</b>（参考 VLAb README quickstart，<b>用我们 v2.0 的 schema-free fix</b>）：
+    <pre><code>cd ~/work/VLAb && accelerate launch --config_file accelerate_configs/single_gpu.yaml \
+  src/lerobot/scripts/train.py \
+  --policy.type=smolvla2 \
+  --policy.repo_id=HuggingFaceTB/SmolVLM2-500M-Video-Instruct \
+  --dataset.repo_id=LightwheelAI/leisaac-pick-orange \
+  --dataset.root=~/work/LeIsaac/datasets/raw/leisaac-pick-orange \
+  --dataset.video_backend=pyav \
+  --output_dir=~/work/LeIsaac/outputs/smolvla2-v2arch-leisaac \
+  --batch_size=8 --steps=30000 \
+  --wandb.enable=false
+</code></pre>
+    （注：v2 的 <code>--policy.repo_id</code> 指 VLM backbone，不是 robot policy ckpt——这跟 v1 的 <code>--policy.path=lerobot/smolvla_base</code> 语义不同。）
+  </li>
+  <li><b>推理对接</b>：主 LeRobot 包不识别 smolvla2，<b>三选一</b>：
+    <ul>
+      <li>(a) 让 <code>policy_server</code> 在 vlab env 里跑（PATH=$VLAb/src:lerobot），smolvla2 类自动注册到 PreTrainedConfig；推荐</li>
+      <li>(b) 把 <code>VLAb/src/lerobot/policies/smolvla2/</code> vendor 进我们的 lerobot fork</li>
+      <li>(c) 写独立的 smolvla2_server，类似 GR00T N1.5 模式（重）</li>
+    </ul>
+    LeIsaac 客户端：<code>--policy_type=lerobot-smolvla2</code>（<code>service_policy_clients.py</code> 走 <code>policy_type.split("-")[1]</code> 拿到 <code>smolvla2</code>；smolvla2 schema 跟 v1 一致，自然键 + 480×640，<code>_build_camera_feature_map</code> 已能自动处理）
+  </li>
+</ol>
+
+<h2>7. P3：Octo（条件性）</h2>
+<p>只有在 DP / DiT 都不达预期、且想测试"Open-X 预训练能否救小数据"时再上 Octo。前置工作：</p>
+<ol>
+  <li>新 conda env：<code>conda create -n octo python=3.10</code> + JAX cuda12 + flax + transformers</li>
+  <li>LeRobot policy_server 不支持 Octo，需要写一个独立的 <code>octo_server.py</code>（参考 GR00T N1.5 的 ZMQ inference_service.py 模式）</li>
+  <li>LeIsaac <code>OctoServicePolicyClient</code>：传 RGB + state 给 server，接 action chunk</li>
+  <li>训练：用 octo-models repo 的 fine-tune 脚本 + 自家数据</li>
+</ol>
+
+<h2>8. P4：RDT-1B（条件性）</h2>
+<p>仅在 Octo 也不行、且预算允许 12–24h 微调时再考虑。前置工作量比 Octo 大约 2x：</p>
+<ol>
+  <li>新 conda env + flash-attn + bfloat16</li>
+  <li>显存：1B 模型 + 双相机 480×640，4090 24GB 大概率<b>不够 full fine-tune</b>，必须 LoRA（thu-ml repo 支持）</li>
+  <li>独立 server 协议（thu-ml repo 自带 ROS-based 推理 demo，需要改成 ZMQ/gRPC）</li>
+  <li>LeIsaac <code>RDTServicePolicyClient</code></li>
+</ol>
+
+<h2>9. 关键问题：为什么 SmolVLA v1 不行而 ACT 行？</h2>
+
+<p>把这个先想清楚再选下一个，避免重复同一个坑：</p>
+
+<table>
+<tr><th>因素</th><th>ACT (✅)</th><th>SmolVLA2 (🟡)</th><th>对 P0-P3 启示</th></tr>
+<tr><td>归纳偏置</td><td>强：CNN + chunked Transformer + VAE，专为 visuomotor 设计</td><td>弱：VLM 是为通用任务训的，action expert 只占小部分参数</td><td>DP、DiT 都是 visuomotor 专用 → 沿用 ACT 的优势</td></tr>
+<tr><td>有效可训参数</td><td>~80M 全部可训</td><td>~100M trainable（其余 350M VLM 冻结）</td><td>DP / DiT 全可训，效率更高</td></tr>
+<tr><td>预训练数据</td><td>仅 ImageNet（ResNet18 backbone）</td><td>SmolVLM2 通用 vision-language 预训练</td><td>VLM 预训练 ≠ 机器人预训练；Octo/RDT 的预训练才真正"对口"</td></tr>
+<tr><td>chunk 大小</td><td>100 步（~3.3s @ 30fps），整套 pick&place 的时序结构能整体建模</td><td>50 步（~1.7s）</td><td>P0/P1 可以试 chunk_size=64 或 100</td></tr>
+<tr><td>训练步数</td><td>10k step × batch 8</td><td>30k step × batch 8</td><td>不是步数问题；架构/数据匹配度才是关键</td></tr>
+</table>
+
+<div class="info">
+  <b>推测</b>：60 episode + ImageNet 预训练的小模型刚好够这个任务的归纳偏置；450M-3B 大模型在 60 ep 上信号过稀。DP/DiT 跟 ACT 同一档"小+visuomotor 专用"，预期能复现成功率。Octo/RDT 是"先靠大规模机器人预训练吃迁移"，是另一条路。
+</div>
+
+<h2>10. 验收标准</h2>
+
+<p>所有候选都用同一套 LeIsaac eval：3 episode × 60s，<code>--policy_action_horizon=&lt;chunk-aligned&gt;</code>。</p>
+
+<table>
+<tr><th>等级</th><th>3 episode 成功率</th><th>结论</th></tr>
+<tr><td>过线（必须）</td><td>≥ 1 / 3</td><td>架构能学</td></tr>
+<tr><td>对齐 ACT baseline</td><td>≥ 2 / 3 且首次 60s 内成功</td><td>可作为本机第二条 working baseline</td></tr>
+<tr><td>明显超越 ACT</td><td>3 / 3 且平均成功时间 &lt; ACT 一半</td><td>策略本身更优，值得推广</td></tr>
+</table>
+
+<hr>
+<p style="color: #666; font-size: 0.9em;">本文档为 <code>vitorcen/LeIsaac</code> fork 的策略横评设计。每完成一个候选，把实际数字回填到第 1 节的 baseline 表。</p>
+
+</body>
+</html>

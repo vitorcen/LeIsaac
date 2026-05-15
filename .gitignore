@@ -55,8 +55,15 @@ _build
 # Pre-Trained Checkpoints
 /.pretrained_checkpoints/
 
-# Teleop Recorded Dataset
-/datasets/
+# Teleop Recorded Dataset + downloaded HF datasets
+# Keep scaffolding (download/convert scripts + README); ignore actual data.
+/datasets/*
+!/datasets/README.md
+!/datasets/download.sh
+!/datasets/convert_to_v30.sh
+!/datasets/raw/
+/datasets/raw/*
+!/datasets/raw/.gitkeep
 
 # Tests
 tests/

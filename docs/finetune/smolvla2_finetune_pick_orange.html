@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="color-scheme" content="light only">
+<title>设计文档：SmolVLA2 在 LeIsaac SO-101 PickOrange 上微调与推理验证</title>
+<style>
+  html { background: #ffffff; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    max-width: 980px; margin: 2em auto; padding: 1.5em 2em;
+    line-height: 1.7; color: #1a1a1a; background: #ffffff;
+  }
+  h1 { color: #111; border-bottom: 2px solid #333; padding-bottom: .3em; }
+  h2 { color: #111; border-bottom: 1px solid #bbb; padding-bottom: .2em; margin-top: 2em; }
+  h3 { margin-top: 1.5em; color: #1f3a6b; }
+  a  { color: #1565c0; }
+  a:hover { color: #0b3d80; }
+  code {
+    background: #eef0f3; color: #1a1a1a;
+    padding: 1px 5px; border-radius: 3px; font-size: 0.92em;
+    border: 1px solid #d8dce2;
+  }
+  pre {
+    background: #f6f7f9; color: #1a1a1a;
+    padding: 1em; border-radius: 4px; overflow-x: auto;
+    font-size: 0.9em; line-height: 1.5;
+    border: 1px solid #d8dce2;
+  }
+  pre code { background: transparent; border: none; padding: 0; }
+  table { border-collapse: collapse; margin: 1em 0; width: 100%; background: #fff; }
+  th, td { border: 1px solid #c4c8cf; padding: .5em .85em; text-align: left; vertical-align: top; }
+  th { background: #e8ebf0; color: #111; }
+  blockquote {
+    margin: 1em 0; padding: .6em 1em;
+    border-left: 4px solid #555; background: #f6f7f9; color: #1a1a1a;
+  }
+  hr { border: none; border-top: 1px solid #c4c8cf; margin: 2em 0; }
+  .tag {
+    display: inline-block; background: #dde6f3; color: #1f3a6b;
+    padding: 2px 9px; border-radius: 10px; font-size: 0.8em; margin-right: 4px;
+  }
+  .warn { background: #fdf3d1; border-left: 4px solid #b8860b; padding: .8em 1em; margin: 1em 0; color: #1a1a1a; }
+  .info { background: #dceefb; border-left: 4px solid #1f6cbd; padding: .8em 1em; margin: 1em 0; color: #1a1a1a; }
+  .ok   { background: #d8efde; border-left: 4px solid #1f8a3e; padding: .8em 1em; margin: 1em 0; color: #1a1a1a; }
+</style>
+</head>
+<body>
+
+<h1>设计文档：SmolVLA2 在 LeIsaac SO-101 PickOrange 上微调与推理验证</h1>
+
+<p>
+<span class="tag">实验性</span>
+<span class="tag">VLA 微调</span>
+<span class="tag">SO-101</span>
+<span class="tag">仿真闭环</span>
+<span class="tag">LeRobot</span>
+</p>
+
+<p><b>作者</b>：vitorcen<br>
+<b>状态</b>：草案 (draft)<br>
+<b>目标分支</b>：<code>vitorcen/LeIsaac</code> fork<br>
+<b>命名说明</b>：HuggingFace 官方暂无 SmolVLA2 模型（截至 2026-05），本设计将 <i>基于 <code>lerobot/smolvla_base</code> 在 LightwheelAI/leisaac-pick-orange 上微调出的</i> ckpt 命名为 <b>SmolVLA2</b>，作为后续 fork 系列的版本号起点。</p>
+
+<hr>
+
+<h2>1. 背景与动机</h2>
+
+<p>本机已有的 LeIsaac SO-101 PickOrange 推理链路覆盖了 GR00T N1.5 / N1.6 / N1.7 三档大模型（3B 参数，单卡显存 ~15–25 GB），但缺少一个 <b>轻量基线</b>：模型小、训练快、推理延迟低，方便在 4090 / 笔记本 GPU 上做快速消融。</p>
+
+<p>HuggingFace 上还没有官方 <code>SmolVLA2</code> 模型，所以本设计 <b>自己基于 SmolVLA 微调一版，命名为 SmolVLA2</b>，作为 fork 的命名锚点：</p>
+<ul>
+  <li>Base：<a href="https://huggingface.co/lerobot/smolvla_base"><code>lerobot/smolvla_base</code></a>，~450M 参数（SmolVLM2-500M-Video-Instruct backbone + Action Expert）。</li>
+  <li>已有第三方微调可作对照：<a href="https://huggingface.co/edge-inference/smolvla-so101-pick-orange"><code>edge-inference/smolvla-so101-pick-orange</code></a>（本机已 zero-shot 实测通推理链路）。</li>
+  <li>训练框架：<a href="https://github.com/huggingface/lerobot">HuggingFace LeRobot</a> 的 <code>lerobot-train</code> CLI，与本机现有 <code>policy_server</code>（端口 8080）天然兼容。</li>
+  <li>输出 ckpt 计划上传到 <code>vitorcen/smolvla2-so101-pick-orange-v0</code>。</li>
+</ul>
+
+<p>本设计的核心问题：</p>
+<blockquote>
+  <b>能否用 SmolVLA base（~450M）+ 同一份 <code>LightwheelAI/leisaac-pick-orange</code> 数据集，微调出一版 <i>SmolVLA2</i> ckpt，复现 <code>edge-inference</code> 第三方版的成功率，并作为评估 GR00T 系大模型 ckpt 的轻量对照基线？</b>
+</blockquote>
+
+<h2>2. 范围</h2>
+<table>
+<tr><th>范围内</th><th>范围外</th></tr>
+<tr>
+  <td>
+    <ul>
+      <li>用 LightwheelAI/leisaac-pick-orange 数据集 + <code>lerobot/smolvla_base</code> 微调出 <b>SmolVLA2</b> ckpt</li>
+      <li>把 SmolVLA2 ckpt 接入 LeIsaac <code>policy_inference.py --policy_type=smolvla</code></li>
+      <li>在 <code>LeIsaac-SO101-PickOrange-v0</code> 仿真环境跑 ≥ 10 轮 episode 评估成功率</li>
+      <li>与 <code>edge-inference/smolvla-so101-pick-orange</code> 第三方 ckpt 横向对比</li>
+      <li>与 GR00T N1.5 ckpt（已实测 1/1）作为大模型上限参照</li>
+    </ul>
+  </td>
+  <td>
+    <ul>
+      <li>真机部署（仅仿真验证）</li>
+      <li>多任务（仅 PickOrange）</li>
+      <li>数据增广 / 合成数据（未来扩展）</li>
+      <li>对 VLM backbone 做继续预训练（仅微调 action expert + state proj）</li>
+    </ul>
+  </td>
+</tr>
+</table>
+
+<h2>3. 数据集</h2>
+<p>来源：<a href="https://huggingface.co/datasets/LightwheelAI/leisaac-pick-orange">LightwheelAI/leisaac-pick-orange</a>（LeRobot Dataset v2.1）</p>
+
+<table>
+<tr><th>字段</th><th>值</th></tr>
+<tr><td>codebase_version</td><td>v2.1</td></tr>
+<tr><td>robot_type</td><td><code>so101_follower</code></td></tr>
+<tr><td>total_episodes</td><td>60</td></tr>
+<tr><td>total_frames</td><td>36,293 （avg ~605 frame / episode ≈ 20s @ 30fps）</td></tr>
+<tr><td>fps</td><td>30</td></tr>
+<tr><td>observation.images.front / wrist</td><td>480×640 RGB，av1 编码 mp4</td></tr>
+<tr><td>observation.state / action</td><td>float32 [6]：5 关节 + 1 gripper</td></tr>
+<tr><td>任务描述</td><td>"Pick up the orange and place it on the plate"</td></tr>
+</table>
+
+<p><b>下载</b>：</p>
+<pre><code>hf download LightwheelAI/leisaac-pick-orange --repo-type dataset</code></pre>
+
+<div class="warn">
+  <b>相机键命名陷阱（实测复盘）</b>：数据集用自然键 <code>front/wrist @ 480×640</code>，但 <code>lerobot/smolvla_base</code> 的 <code>config.json</code> 声明了 3 个占位槽 <code>camera1/camera2/camera3 @ 256×256</code>。<br><br>
+  draccus 对 dict 类字段的 CLI override 是 <b>合并</b>而非替换——首次实验里我尝试 <code>--policy.input_features='{...自然键...}'</code> 想覆盖 base 的 schema，结果 <b>两套键被合并</b>（5 个槽），训练出来的 ckpt 既有占位 camera1/2/3（其中 camera3 完全没数据 → 死权重）又有 front/wrist，且模型按 <b>256×256 下采样</b>训练，分辨率损失大。同时也试过 <code>--policy.input_features={}</code>，draccus 视作 no-op。<br><br>
+  正解（见 §5）：把 <code>smolvla_base</code> 克隆到本地、改 <code>config.json</code> 清空 <code>input_features</code> 和 <code>empty_cameras</code>，让 <code>lerobot-train</code> 在 <code>make_policy()</code> 走到 <code>if not cfg.input_features: cfg.input_features = features_from_dataset</code> 这一行，自然键 + 真实 480×640 自动生效。
+</div>
+
+<h2>4. 模型与代码栈</h2>
+
+<table>
+<tr><th>组件</th><th>选型</th><th>说明</th></tr>
+<tr><td>Base 模型</td><td><code>lerobot/smolvla_base</code></td><td>~450M 参数，SmolVLM2-500M-Video-Instruct backbone（vision encoder 冻结）+ Action Expert（trainable）</td></tr>
+<tr><td>输出 ckpt 命名</td><td><code>vitorcen/smolvla2-so101-pick-orange-v0</code></td><td>本设计的产物；上传到自己的 HF 命名空间</td></tr>
+<tr><td>训练框架</td><td>LeRobot <code>lerobot-train</code></td><td>HF 官方 CLI，draccus dataclass 配置；本机版本 v0.5.1+</td></tr>
+<tr><td>LeRobot 源码</td><td><code>~/work/lerobot-experience/lerobot</code></td><td>editable install，conda env <code>lerobot</code></td></tr>
+<tr><td>Conda env</td><td><code>conda activate lerobot</code></td><td>训练 + 推理 server 共用</td></tr>
+<tr><td>Data config</td><td>无需显式选择</td><td>LeRobot 直接消费 <code>observation.images.*</code> 自然键，自动匹配 input_features</td></tr>
+<tr><td>第三方对照 ckpt</td><td><code>edge-inference/smolvla-so101-pick-orange</code></td><td>同数据集的第三方微调，作为复现目标</td></tr>
+<tr><td>LeIsaac fork</td><td><code>vitorcen/LeIsaac</code></td><td>policy_inference 客户端 + <code>_build_camera_feature_map</code> 已根据 ckpt config 自动选 rename map</td></tr>
+</table>
+
+<div class="info">
+  <b>关键差异 vs GR00T 流程</b>：
+  <ul>
+    <li>训练命令是 <code>lerobot-train --policy.path=lerobot/smolvla_base --dataset.repo_id=...</code>，不再用 GR00T 的 <code>gr00t_finetune.py</code>。</li>
+    <li>推理 server 是通用的 LeRobot <code>policy_server</code>（端口 <b>8080</b>，gRPC），<b>不再用 GR00T 的 ZMQ :5555</b>。Server 启动时不绑定 ckpt，由客户端在请求里指明。</li>
+    <li>没有 <code>embodiment_tag</code> 概念——SmolVLA 直接消费 LeRobot Dataset feature schema。</li>
+  </ul>
+</div>
+
+<h2>5. 训练计划</h2>
+
+<h3>5.1 命令模板（推荐用 LeIsaac 仓的 scaffold）</h3>
+<pre><code># 一次性：准备 schema-free 的本地 base（清掉 input_features + empty_cameras）
+bash scripts/finetune/prepare_smolvla_base.sh
+# → outputs/.bases/smolvla_base_no_features/
+
+# 微调
+BASE_MODEL=$(pwd)/outputs/.bases/smolvla_base_no_features \
+DATASET_REPO_ID=LightwheelAI/leisaac-pick-orange \
+OUTPUT_NAME=smolvla2-leisaac-pick-orange \
+STEPS=30000 \
+BATCH_SIZE=8 \
+NUM_WORKERS=2 \
+SAVE_FREQ=5000 \
+EXTRA_ARGS='--dataset.video_backend=pyav' \
+bash scripts/finetune/lerobot_finetune.sh</code></pre>
+
+<p>等价的直接 <code>lerobot-train</code> 调用（无 scaffold）：</p>
+<pre><code>conda activate lerobot
+lerobot-train \
+  --policy.path=$(pwd)/outputs/.bases/smolvla_base_no_features \
+  --policy.push_to_hub=false \
+  --dataset.repo_id=LightwheelAI/leisaac-pick-orange \
+  --dataset.root=datasets/raw/leisaac-pick-orange \
+  --output_dir=outputs/smolvla2-leisaac-pick-orange \
+  --batch_size=8 --steps=30000 --save_freq=5000 --num_workers=2 \
+  --policy.device=cuda --wandb.enable=false \
+  --dataset.video_backend=pyav</code></pre>
+
+<h3>5.2 超参选择（与 <code>edge-inference/smolvla-so101-pick-orange</code> 对齐）</h3>
+
+<table>
+<tr><th>项</th><th>值</th><th>依据 / 实测踩坑</th></tr>
+<tr><td>steps</td><td>30,000</td><td>edge-inference 使用的步数；4090 单卡约 9 step/s ⇒ ~56 min。先前 20k 步 + batch 64 训出的 ckpt 推理时会动但完不成任务，故对齐第三方</td></tr>
+<tr><td>batch_size</td><td><b>8</b></td><td>edge-inference 默认；4090 实测 ~9 step/s。<b>反直觉</b>：先前 batch=64 才 1.2 step/s（PCIe / pyav 解码 IO 撞瓶颈），等同步骤×7.5× 倍训练时间，且不见 batch 越大收敛越好</td></tr>
+<tr><td>num_workers</td><td>2</td><td>torchcodec + 4 worker 在长跑时会段错误（先前训练在 1601 步崩）；2 worker 稳定</td></tr>
+<tr><td>video_backend</td><td>pyav</td><td>慢一点但稳。torchcodec 偶发 segfault</td></tr>
+<tr><td>input_features</td><td>自然键 480×640</td><td>用 <code>prepare_smolvla_base.sh</code> 把 base 的占位 schema 剥光，让 lerobot-train 从数据集 features 自动生成。<b>不要</b> 用 <code>--policy.input_features</code> CLI override（draccus 合并而非替换）</td></tr>
+<tr><td>optimizer_lr</td><td>1e-4（默认）</td><td>SmolVLAConfig 默认；warmup 1000 步 + cosine decay 至 2.5e-6</td></tr>
+<tr><td>freeze_vision_encoder</td><td>True（默认）</td><td>只调 action expert + state proj，约 100M trainable / 450M total</td></tr>
+<tr><td>chunk_size / n_action_steps</td><td>50</td><td>SmolVLA 默认，~1.7s @ 30fps</td></tr>
+<tr><td>checkpoint 保存</td><td>每 5000 步 + last</td><td>方便消融</td></tr>
+</table>
+
+<h3>5.3 硬件实测</h3>
+
+<table>
+<tr><th>资源</th><th>实测</th><th>备注</th></tr>
+<tr><td>GPU 显存</td><td><b>~7 GB</b> @ batch 8 / 480×640</td><td>vision encoder 冻结 + bf16 AMP；远小于 4090 上限</td></tr>
+<tr><td>GPU 数量</td><td>1</td><td>—</td></tr>
+<tr><td>训练时长</td><td><b>~56 min</b> for 30k step（9 step/s）</td><td>对比：batch=64 + 256×256 时 4h49min 也跑了 20k 步，结果反而差</td></tr>
+<tr><td>磁盘</td><td>~13 GB / ckpt set</td><td>11 份 ckpt × ~1.2 GB；按需删早期</td></tr>
+</table>
+
+<h2>6. 推理验证</h2>
+
+<h3>6.1 启动 LeRobot policy_server</h3>
+<p>Server 是通用的，<b>启动时不绑定 ckpt</b>；客户端在请求里通过 <code>policy_path</code> 指定具体模型。</p>
+<pre><code>bash ~/work/isaaclab-experience/scripts/policy_server.sh start lerobot
+# 或直接：
+conda activate lerobot && \
+  python -m lerobot.async_inference.policy_server --host 0.0.0.0 --port 8080</code></pre>
+
+<div class="info">
+  端口 <b>8080</b>（gRPC），与 GR00T N1.5/N1.6/N1.7 的 :5555 完全独立，可以并发起 server。
+</div>
+
+<h3>6.2 启动 Isaac Sim 客户端（加载 SmolVLA2 ckpt）</h3>
+<pre><code>cd ~/work/isaaclab-experience/LeIsaac && \
+  PYTHONUNBUFFERED=1 python -u scripts/evaluation/policy_inference.py \
+    --task=LeIsaac-SO101-PickOrange-v0 \
+    --eval_rounds=10 --episode_length_s=120 \
+    --policy_type=lerobot-smolvla \
+    --policy_host=127.0.0.1 --policy_port=8080 \
+    --policy_timeout_ms=15000 \
+    --policy_language_instruction='Pick the orange to the plate' \
+    --policy_checkpoint_path=/home/david/work/LeIsaac/outputs/smolvla2-leisaac-pick-orange/checkpoints/last/pretrained_model \
+    --policy_action_horizon=16 --device=cuda --enable_cameras</code></pre>
+
+<div class="info">
+  <b>camera 自动适配</b>：LeIsaac 客户端 <code>_build_camera_feature_map(ckpt_path, sim_cameras)</code> 会读 ckpt 的 <code>config.json/input_features</code>：
+  <ul>
+    <li>自然键 <code>front/wrist</code>（我们用 <code>prepare_smolvla_base.sh</code> 训出来的 SmolVLA2，以及 edge-inference）→ 返回 <code>(None, [])</code>，不 rename、不 pad。</li>
+    <li>占位键 <code>camera1/2/3</code>（直接 <code>--policy.path=lerobot/smolvla_base</code> 训出来的劣化 ckpt）→ 返回 <code>(rename=front→camera1, wrist→camera2, empty=[camera3])</code>；client 自动 zero-pad 多余 camera3 槽。</li>
+  </ul>
+  上述两条 fallback 在 LeIsaac fork 已实现（patch 见 <code>patches/leisaac/</code>）。
+</div>
+
+<div class="warn">
+  <b>推理时另两个必坑</b>（实测）：
+  <ol>
+    <li><b>policy_server 状态在 client 失败时不会自清</b>：上一次失败的 client 会留下 <code>last_processed_obs</code>，导致下一次 client 的首帧被去重过滤器丢掉（server log "Observation #1 has been filtered out"）。规避：每次重试前 <code>pkill -9 -f "policy_server" && bash scripts/policy_server.sh start lerobot</code>。</li>
+    <li><b>Isaac Sim 进程在 Python 异常后不一定释放 GPU</b>：失败的 episode 留下 ~6GB VRAM 占用，下一次再起 Isaac Sim 会 OOM 或共享 GPU 慢。规避：<code>pkill -9 -f "policy_inference.py"</code> 后 <code>nvidia-smi</code> 确认 GPU 干净再重试。</li>
+  </ol>
+</div>
+
+<h2>7. 验收标准</h2>
+
+<table>
+<tr><th>等级</th><th>10 轮 episode 成功率</th><th>结论</th></tr>
+<tr><td>MVP（必须达到）</td><td>≥ 2 / 10</td><td>证明 SmolVLA2 + 公开数据可以学到任务，可继续优化</td></tr>
+<tr><td>持平 edge-inference 第三方 ckpt</td><td>≥ 与第三方 ckpt 实测数 ±1</td><td>复现成功，SmolVLA2 可作为轻量基线发布</td></tr>
+<tr><td>逼近 GR00T N1.5 baseline</td><td>≥ 5 / 10</td><td>~7× 模型压缩 + 仍保留实用成功率，性价比高</td></tr>
+</table>
+
+<p>附加指标：</p>
+<ul>
+  <li>平均推理耗时 / chunk &lt; 80ms（SmolVLA2 ~450M 参数预计远快于 GR00T 3B）</li>
+  <li>训练完成 train_loss 收敛趋势记录（对比 edge-inference ckpt 公开数据）</li>
+  <li>训练显存峰值（用 <code>nvidia-smi</code> 记录）</li>
+</ul>
+
+<h2>8. 风险与缓解</h2>
+
+<table>
+<tr><th>风险</th><th>影响</th><th>缓解</th></tr>
+<tr>
+  <td>SmolVLA 在 60 episode 小数据上对 PickOrange 这种几何敏感任务能力不足</td>
+  <td>SmolVLA2 成功率 &lt;&lt; GR00T baseline</td>
+  <td>这正是实验目的：定量量化"轻量 VLA"和"3B VLA"在小数据微调上的能力差；不达 MVP 也是有价值的负结果</td>
+</tr>
+<tr>
+  <td>LeRobot v0.5.1+ <code>SmolVLAConfig</code> 字段与 LeIsaac 旧版 vendored v0.4.2 不一致</td>
+  <td>policy_server 加载 ckpt 报 <code>unknown fields</code></td>
+  <td>已知问题，已在 <code>server/start_server.sh</code> 显式用 conda env 的 v0.5.1+ 而非 vendored v0.4.2；本设计沿用此修复</td>
+</tr>
+<tr>
+  <td>LeIsaac sim 相机 fps（30）和 SmolVLA expected 不匹配</td>
+  <td>动作 chunk 时序错位</td>
+  <td>数据集本身就是 30fps 采集，训练-仿真完全一致，无错位</td>
+</tr>
+<tr>
+  <td>Policy server gRPC 返回 Empty（动作队列耗尽）</td>
+  <td>客户端 timeout / 复用旧动作</td>
+  <td>LeIsaac client 已实现 <code>_receive_action</code> 有界重试（max_retries=8, sleep=25ms），无需额外改动</td>
+</tr>
+<tr>
+  <td>"SmolVLA2" 命名与 HF 官方未来发布的同名模型冲突</td>
+  <td>命名空间撞车</td>
+  <td>上传时用 <code>vitorcen/smolvla2-so101-pick-orange-v0</code>，加 owner 前缀；如官方真发 SmolVLA2，README 里加 disambiguation</td>
+</tr>
+</table>
+
+<h2>9. 里程碑 + 已完成步骤</h2>
+
+<table>
+<tr><th>M</th><th>动作</th><th>验收 / 实际结果</th><th>耗时</th></tr>
+<tr><td>M1</td><td>下载数据集（670 MB）+ smoke test 训练 50 步</td><td>✅ loss 下降，pipeline 通</td><td>~15 min</td></tr>
+<tr><td>M2.v1 <s>失败</s></td><td>批量 64、20000 步，<code>--policy.path=lerobot/smolvla_base</code> 直接微调 + rename_map 占位键</td><td>❌ 训出了 256×256 + 3 占位相机 schema 的 ckpt；客户端能跑、机器人会动，<b>10 轮 episode 全部 timeout</b></td><td>4h49min</td></tr>
+<tr><td>M2.v2 ✅</td><td>用 <code>prepare_smolvla_base.sh</code> 剥光 base schema，批量 8、30000 步，对齐 edge-inference 配方</td><td>🔄 训练中（~56 min ETA）</td><td>~1h</td></tr>
+<tr><td>M3</td><td>仿真推理 10 轮评估 SmolVLA2 v2 ckpt</td><td>⏸ 待 M2.v2 完成</td><td>~30 min</td></tr>
+<tr><td>M4</td><td>同环境跑 edge-inference 第三方 ckpt 10 轮做对照</td><td>⏸</td><td>30 min</td></tr>
+<tr><td>M5</td><td>结果写入 fork README + 上传 SmolVLA2 ckpt 到 <code>vitorcen/smolvla2-so101-pick-orange-v0</code></td><td>⏸</td><td>2 小时</td></tr>
+</table>
+
+<div class="info">
+  <b>M2.v1 失败原因复盘</b>：
+  <ol>
+    <li><code>--policy.path=lerobot/smolvla_base</code> 加载的 base schema 含 3 个占位相机 <code>camera1/2/3 @ 256×256</code>；试图用 <code>--policy.input_features=...</code> 覆盖时 draccus 合并而非替换，结果训练出来 schema 是 <b>5 个相机槽 + 256×256 下采样</b>。</li>
+    <li>同等 60 episode 数据下，<code>shadowHokage/act_policy</code>（80M ACT @ batch 8, 10k steps, 480×640）成功完成任务；说明数据本身够，问题在我们 SmolVLA 训练 schema 不对。</li>
+    <li>对照 <code>edge-inference/smolvla-so101-pick-orange</code>（同 base 同数据 ✅）的 <code>train_config.json</code>，他们的 ckpt schema 是<b>纯自然键 + 480×640</b>。推断只能通过本地剥光 base 的 input_features 实现。</li>
+    <li>另：batch=64 反而比 batch=8 慢 7.5×（PCIe / pyav 解码 IO 撞瓶颈，不是 GPU 计算 bound）。</li>
+  </ol>
+</div>
+
+<h2>10. 参考</h2>
+
+<ul>
+  <li><a href="https://arxiv.org/abs/2506.01844">SmolVLA paper (Shukor et al., 2025)</a></li>
+  <li><a href="https://huggingface.co/lerobot/smolvla_base">SmolVLA base 模型</a></li>
+  <li><a href="https://huggingface.co/edge-inference/smolvla-so101-pick-orange">edge-inference/smolvla-so101-pick-orange 第三方对照 ckpt</a></li>
+  <li><a href="https://huggingface.co/datasets/LightwheelAI/leisaac-pick-orange">数据集 LightwheelAI/leisaac-pick-orange</a></li>
+  <li><a href="https://github.com/huggingface/lerobot">LeRobot 主仓库</a></li>
+  <li>本机 LeRobot 源码：<code>~/work/lerobot-experience/lerobot</code>（v0.5.1+ editable）</li>
+  <li>LeIsaac fork：<code>~/work/isaaclab-experience/LeIsaac</code>（patch 见 <code>patches/leisaac/</code>）</li>
+</ul>
+
+<hr>
+<p style="color: #666; font-size: 0.9em;">本文档为 <code>vitorcen/LeIsaac</code> fork 的 SmolVLA2 实验设计；实验执行后请在同目录补一份 <code>smolvla2_finetune_pick_orange_results.html</code> 记录实际数字与结论。</p>
+
+</body>
+</html>
